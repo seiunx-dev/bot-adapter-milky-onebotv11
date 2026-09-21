@@ -8,6 +8,8 @@ Rust bridge that adapts an upstream Milky gateway to the OneBot-11 protocol. Dow
 
 Single binary crate, edition 2024. MSRV is the latest stable Rust (`dtolnay/rust-toolchain@stable`). Docker images target Alpine Linux (musl libc).
 
+The repository was originally a Go implementation; that tree (`cmd/`, `internal/`, `go.mod`, `go.sum`) has been removed.
+
 ## Setup
 
 ```bash
@@ -56,17 +58,19 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and on every PR: `c
 
 3. **`src/onebot/`** — downstream surface (axum 0.8):
    - Forward WS: `/` (universal), `/api`, `/api/` (receive only), `/event`, `/event/` (send only).
-   - HTTP API: `POST /http/<action>` when `enable_http_api` is set.
+   - HTTP API: `POST /http/<action>` (and `GET`) when `enable_http_api` is set.
    - Reverse WS: dials out to configured URLs with auto-reconnect; sends `X-Self-ID`, `X-Client-Role`, optional `Authorization: Bearer <token>` headers.
+
+`Server` calls back into `bridge::Service` through the `onebot::Handler` trait (`handle_api`, `on_ws_connect`, `current_self_id`) — that trait is the seam between the layers. `Service::run` broadcasts to every connected forward and reverse WS client flagged `can_send`.
 
 **State (`src/state/`)**:
 - `MessageMap` — LRU map of OneBot `message_id` → Milky message ref.
 - `RequestMap` — `flag` strings → friend/group request refs.
-- `Runtime` — login info + online/good status + heartbeat.
+- `Runtime` — login info + online/good status, used by `get_login_info`, `get_status`, and the heartbeat ticker in `Service::run` that emits `meta_event` heartbeats at `bridge.heartbeat_interval_ms`.
 
-**Config (`src/config.rs`)**: strict JSON decoding (`#[serde(deny_unknown_fields)]`); unknown keys fail loading.
+**Config (`src/config.rs`)**: strict JSON decoding (`#[serde(deny_unknown_fields)]`); unknown keys fail loading. `Config::load` reads, parses, then runs `validate()`. `bridge.message_format` must be `"array"` or `"string"` — `array` is the default and is what the IR aligns to.
 
-**Shutdown**: `tokio::sync::watch::channel<bool>`; `main` listens for SIGINT/SIGTERM (Unix) or Ctrl+C (Windows).
+**Shutdown**: `tokio::sync::watch::channel<bool>`; `main` listens for SIGINT/SIGTERM (Unix) or Ctrl+C (Windows), then sends `true` to wake `server.run` and `service.run` together. After both join, `service.shutdown()` closes the SDK.
 
 ### Adding a new OneBot-11 action
 
@@ -83,7 +87,7 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and on every PR: `c
 
 ## Conventions
 
-- **Logging**: `tracing` everywhere, initialized via `logging::init`. Use structured key/value pairs (`tracing::info!(field = %value, "msg")`), not format strings. Fields `bot_id`/`group_id`/`user_id` are treated as identity tags.
+- **Logging**: `tracing` everywhere, initialized once in `main.rs` via `logging::init` at the level set by `bridge.log_level`. Use structured key/value pairs (`tracing::info!(field = %value, "msg")`), not format strings. The `ColoredFormatter` in `src/logging.rs` emits `[ts][LEVEL][component] message field=value` lines and treats `bot_id`/`group_id`/`user_id` as identity tags. ANSI escapes are written unconditionally; `enable-ansi-support` turns on VT processing so Windows cmd renders them.
 - **Error codes** returned to OneBot clients: `1400` (bad params), `1500` (upstream/unknown), `1502` (not found), `1503` (unsupported).
 - **Errors**: propagate via `MilkyClientError` (`thiserror`-derived) with `#[from]`. Do not introduce `anyhow`.
 - **`Upstream` trait**: mirrors `milky::Client`'s public async methods for test stubbing. Add new methods to both the trait and `StubUpstream` when extending the client.
