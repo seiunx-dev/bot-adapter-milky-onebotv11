@@ -63,10 +63,9 @@ async fn main() -> ExitCode {
     let svc = Service::new(cfg, upstream);
     let server = Server::new(onebot_cfg, svc.clone());
 
-    if let Err(e) = svc.connect().await {
-        tracing::error!(err = %e, "connect to milky upstream failed");
-        return ExitCode::from(1);
-    }
+    // Connects in the background and keeps reconnecting if the Milky server
+    // is down or restarts; the OneBot side runs regardless.
+    svc.start();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
