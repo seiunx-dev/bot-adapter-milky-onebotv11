@@ -44,7 +44,7 @@ cargo build --release --locked
 docker build -t milky-ob11-bridge .
 ```
 
-CI (`.github/workflows/ci.yml`) runs on every push to `main` and on every PR: `cargo fmt --all --check`, `cargo clippy ... -D warnings`, `cargo test --locked`.
+CI (`.github/workflows/ci.yml`) runs on every push to `main`/`rust` and on every PR targeting them: `cargo fmt --all --check`, `cargo clippy ... -D warnings`, `cargo test --locked`.
 
 
 
@@ -52,7 +52,7 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and on every PR: `c
 
 `src/main.rs` wires the layers together. The bridge is a single long-running async process (tokio multi-thread runtime) with three layers connected via channels:
 
-1. **`src/milky/`** — upstream client. `Client::new` constructs a `milky_rust_sdk::MilkyClient` over WebSocket. `connect()` opens the WS, fetches login info, and spawns a translator task that converts SDK events into `types::InboundEvent`s. Outgoing methods (`send_*_message`, `delete_message`, `get_*`, `handle_*_request`) call the SDK plus segment-IR conversion (`segments.rs`).
+1. **`src/milky/`** — upstream client. `Client::new` constructs a `milky_rust_sdk::MilkyClient`, used only for the HTTP API. The event WebSocket is owned by `stream::Supervisor` (the SDK's own event loop cannot reconnect): `start()` spawns it, and it connects, fetches login info, translates SDK events into `types::InboundEvent`s, and reconnects with exponential backoff (1s doubling to 30s) forever, logging ERROR while the stream stays down. Connection state is published on a `watch` channel (`subscribe_state()`), which `Service::start` mirrors into `Runtime`. Outgoing methods (`send_*_message`, `delete_message`, `get_*`, `handle_*_request`) call the SDK plus segment-IR conversion (`segments.rs`).
 
 2. **`src/bridge/`** — translation core. `Service::run` is the central event loop: pulls `InboundEvent`s, translates them via `translator::translate_event` into OneBot-11 payloads, and broadcasts via `onebot::Server::broadcast`. `handle_api` is the dispatch table for every supported OneBot-11 action. `message_ir.rs` is the intermediate representation for segment conversion, including CQ-code encode/decode.
 

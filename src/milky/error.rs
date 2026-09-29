@@ -6,6 +6,6 @@ pub enum MilkyClientError {
     Sdk(#[from] milky_rust_sdk::MilkyError),
     #[error("bad segment: {0}")]
     BadSegment(String),
-    #[error("not connected")]
-    NotConnected,
+    #[error("invalid milky endpoint: {0}")]
+    InvalidEndpoint(String),
 }

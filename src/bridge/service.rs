@@ -4,7 +4,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 
@@ -20,12 +19,6 @@ use crate::state::{MessageMap, RequestMap, Runtime};
 use crate::types::{
     EventKind, GroupInfo, GroupMemberInfo, InboundEvent, LoginInfo, MessageRef, RequestRef, Segment,
 };
-
-#[derive(Debug, Error)]
-pub enum ServiceError {
-    #[error("upstream: {0}")]
-    Upstream(#[from] MilkyClientError),
-}
 
 #[async_trait]
 pub trait Upstream: Send + Sync + 'static {
@@ -64,7 +57,10 @@ pub trait Upstream: Send + Sync + 'static {
         request: &RequestRef,
         approve: bool,
     ) -> Result<(), MilkyClientError>;
-    async fn connect(&self) -> Result<LoginInfo, MilkyClientError>;
+    /// Start the supervised event stream (connects and reconnects forever).
+    fn start(&self);
+    /// `Some(login)` while the event stream is connected, `None` otherwise.
+    fn subscribe_state(&self) -> watch::Receiver<Option<LoginInfo>>;
     async fn shutdown(&self);
 }
 
@@ -127,8 +123,11 @@ impl Upstream for MilkyClient {
     ) -> Result<(), MilkyClientError> {
         MilkyClient::handle_group_request(self, request, approve).await
     }
-    async fn connect(&self) -> Result<LoginInfo, MilkyClientError> {
-        MilkyClient::connect(self).await
+    fn start(&self) {
+        MilkyClient::start(self)
+    }
+    fn subscribe_state(&self) -> watch::Receiver<Option<LoginInfo>> {
+        MilkyClient::subscribe_state(self)
     }
     async fn shutdown(&self) {
         MilkyClient::shutdown(self).await
@@ -159,14 +158,35 @@ impl Service {
         })
     }
 
-    pub async fn connect(&self) -> Result<(), ServiceError> {
-        let mut login = self.upstream.connect().await?;
-        if self.cfg.bridge.self_id != 0 {
-            login.self_id = self.cfg.bridge.self_id;
+    /// Start the upstream event stream and mirror its connection state into
+    /// the runtime, so `get_status` and heartbeats report `online: false`
+    /// while Milky is unreachable. Never fails: the upstream retries forever.
+    pub fn start(self: &Arc<Self>) {
+        let mut state_rx = self.upstream.subscribe_state();
+        self.upstream.start();
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let state = state_rx.borrow_and_update().clone();
+                svc.apply_upstream_state(state);
+                if state_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn apply_upstream_state(&self, state: Option<LoginInfo>) {
+        match state {
+            Some(mut login) => {
+                if self.cfg.bridge.self_id != 0 {
+                    login.self_id = self.cfg.bridge.self_id;
+                }
+                self.runtime.set_login(login);
+                self.runtime.set_upstream_connected(true);
+            }
+            None => self.runtime.set_upstream_connected(false),
         }
-        self.runtime.set_login(login);
-        self.runtime.set_upstream_connected(true);
-        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -596,7 +616,10 @@ impl Service {
             }
         };
         let Some(reff) = self.messages.get(p.message_id) else {
-            tracing::warn!(message_id = p.message_id, "get_msg: message_id not in MessageMap");
+            tracing::warn!(
+                message_id = p.message_id,
+                "get_msg: message_id not in MessageMap"
+            );
             return failure(1502, "message_id not found", echo);
         };
         tracing::debug!(
@@ -750,8 +773,7 @@ mod tests {
         let missing: MessageIdParams = serde_json::from_value(json!({})).unwrap();
         assert_eq!(missing.message_id, 0);
 
-        let null: MessageIdParams =
-            serde_json::from_value(json!({"message_id": null})).unwrap();
+        let null: MessageIdParams = serde_json::from_value(json!({"message_id": null})).unwrap();
         assert_eq!(null.message_id, 0);
     }
 
@@ -766,9 +788,18 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct StubUpstream {
         sends: AtomicUsize,
+        state: watch::Sender<Option<LoginInfo>>,
+    }
+
+    impl Default for StubUpstream {
+        fn default() -> Self {
+            Self {
+                sends: AtomicUsize::new(0),
+                state: watch::channel(None).0,
+            }
+        }
     }
 
     #[async_trait]
@@ -824,7 +855,7 @@ mod tests {
             &self,
             _message_ref: &MessageRef,
         ) -> Result<InboundEvent, MilkyClientError> {
-            Err(MilkyClientError::NotConnected)
+            Err(MilkyClientError::BadSegment("stub has no messages".into()))
         }
         async fn delete_message(&self, _message_ref: &MessageRef) -> Result<(), MilkyClientError> {
             Ok(())
@@ -844,11 +875,14 @@ mod tests {
         ) -> Result<(), MilkyClientError> {
             Ok(())
         }
-        async fn connect(&self) -> Result<LoginInfo, MilkyClientError> {
-            Ok(LoginInfo {
+        fn start(&self) {
+            self.state.send_replace(Some(LoginInfo {
                 self_id: 1,
                 nickname: "stub".into(),
-            })
+            }));
+        }
+        fn subscribe_state(&self) -> watch::Receiver<Option<LoginInfo>> {
+            self.state.subscribe()
         }
         async fn shutdown(&self) {}
     }
@@ -1156,20 +1190,50 @@ mod tests {
         assert!(svc.messages.get(7).is_some());
     }
 
+    async fn wait_online(svc: &Service, want: bool) {
+        for _ in 0..200 {
+            if svc.runtime.status().online == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("runtime online never became {want}");
+    }
+
     #[tokio::test]
-    async fn connect_promotes_runtime_to_online() {
+    async fn start_promotes_runtime_to_online() {
         let svc = stub_service();
-        svc.connect().await.unwrap();
-        assert!(svc.runtime.status().online);
+        svc.start();
+        wait_online(&svc, true).await;
         assert_eq!(svc.runtime.login().nickname, "stub");
     }
 
     #[tokio::test]
-    async fn connect_overrides_self_id_from_cfg() {
+    async fn start_overrides_self_id_from_cfg() {
         let mut c = cfg();
         c.bridge.self_id = 4242;
         let svc = Service::with_upstream(c, Arc::new(StubUpstream::default()));
-        svc.connect().await.unwrap();
+        svc.start();
+        wait_online(&svc, true).await;
         assert_eq!(svc.runtime.login().self_id, 4242);
+    }
+
+    #[tokio::test]
+    async fn upstream_disconnect_marks_runtime_offline_and_keeps_login() {
+        let stub = Arc::new(StubUpstream::default());
+        let svc = Service::with_upstream(cfg(), stub.clone());
+        svc.start();
+        wait_online(&svc, true).await;
+        stub.state.send_replace(None);
+        wait_online(&svc, false).await;
+        assert!(!svc.runtime.status().good);
+        assert_eq!(
+            svc.runtime.login().self_id,
+            1,
+            "self_id survives a disconnect"
+        );
+        stub.start();
+        wait_online(&svc, true).await;
+        assert!(svc.runtime.status().good);
     }
 }
