@@ -89,9 +89,9 @@ cargo fmt --all                                              # 格式化
 cargo clippy --all-targets --all-features -- -D warnings     # lint（CI 以 warnings 为错）
 ```
 
-CI（`.github/workflows/ci.yml`）在每次 push 到 `main` / `rust` 与每个 PR 上跑 fmt / clippy / test。Release 工作流（`.github/workflows/release-build.yml`）在发布 release 时跨编译 linux / windows / darwin × amd64 / arm64 二进制并上传。
+CI（`.github/workflows/ci.yml`）在每次 push 到 `main` / `rust` 与每个以它们为目标的 PR 上跑 fmt / check / clippy / test。Release 工作流（`.github/workflows/release.yml`）在推送 `v*` tag 时于各平台原生构建 linux-x64 / macos-arm64 / windows-x64 二进制，打包后连同 SHA256 校验文件发布到 GitHub Release；手动触发时只构建并上传 workflow artifact。
 
-架构与扩展指南见 [`CLAUDE.md`](./CLAUDE.md)。
+架构与扩展指南见 [`AGENTS.md`](./AGENTS.md)。
 
 ## 说明
 

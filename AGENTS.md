@@ -44,9 +44,7 @@ cargo build --release --locked
 docker build -t milky-ob11-bridge .
 ```
 
-CI (`.github/workflows/ci.yml`) runs on every push to `main`/`rust` and on every PR targeting them: `cargo fmt --all --check`, `cargo clippy ... -D warnings`, `cargo test --locked`.
-
-
+CI (`.github/workflows/ci.yml`) runs on every push to `main`/`rust` and on every PR targeting them: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`.
 
 ## Architecture
 
@@ -134,15 +132,15 @@ Examples from this repo's history:
 
 Use the standardized workflow layout in `.github/workflows`:
 
-- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
+- `ci.yml` runs on pushes to `main` and `rust` (the default branch), pull requests targeting either, and manual dispatch.
 - Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
-- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
-- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds native release archives for `linux-x64`, `macos-arm64` and `windows-x64`, uploads them with `actions/upload-artifact`, and on tag pushes publishes them plus a `SHA256SUMS-<tag>.txt` as GitHub Release assets.
+- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs targeting `main` that touch Docker/build inputs, and manual dispatch (pushes to `rust` do not trigger it). PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 
 Workflow maintenance rules:
 
 - Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Use `actions/checkout@v6`, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
 - Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
 - Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
 - Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
