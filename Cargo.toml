@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 milky-rust-sdk = "1"
 axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = "0.29"
-async-trait = "0.1"
+async-trait = "0.1.92"
 futures-util = "0.3"
 http = "1"
 url = "2"
